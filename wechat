@@ -1,0 +1,150 @@
+import pyautogui
+import pytesseract
+from PIL import Image
+from docx import Document
+import re
+import os
+import time
+import schedule
+import logging
+import threading
+import queue
+from pathlib import Path
+
+# 设置日志记录配置
+logging.basicConfig(filename='app.log', level=logging.DEBUG,
+                    format='%(asctime)s - %(levelname)s - %(message)s')
+
+# 获取当前用户的桌面路径
+def get_desktop_path():
+    return str(Path.home() / "Desktop")
+
+# 初始化或创建一个新的 Word 文档并保存到桌面
+def init_doc_on_desktop(filename):
+    desktop_path = get_desktop_path()
+    full_path = os.path.join(desktop_path, filename)
+    if not os.path.exists(full_path):
+        doc = Document()
+        doc.save(full_path)
+        print(f"创建了新的文档: {full_path}")
+    else:
+        doc = Document(full_path)
+        print(f"加载了已有的文档: {full_path}")
+    return doc, full_path
+
+# 强制创建新的文档（可选）并保存到桌面
+def ensure_new_doc_on_desktop(filename):
+    doc, full_path = init_doc_on_desktop(filename)
+    if os.path.exists(full_path):
+        os.remove(full_path)  # 删除旧文件
+        print(f"删除了旧的文档: {full_path}")
+    doc = Document()
+    doc.save(full_path)
+    print(f"创建了新的文档: {full_path}")
+    return doc, full_path
+
+# 保存招聘信息到 Word 文档
+def save_to_doc(doc, message, filename):
+    doc.add_paragraph(message)
+    doc.save(filename)
+
+# 筛选词条并总结到新的 Word 文档
+def filter_and_summarize(source_filename, target_filename, keywords):
+    source_doc = Document(source_filename)
+    target_doc = Document()
+
+    summary = {}
+    for para in source_doc.paragraphs:
+        for keyword in keywords:
+            if re.search(keyword, para.text, re.IGNORECASE):
+                if keyword not in summary:
+                    summary[keyword] = []
+                summary[keyword].append(para.text)
+
+    # 写入总结文档
+    for keyword, entries in summary.items():
+        target_doc.add_heading(keyword, level=1)
+        for entry in entries:
+            target_doc.add_paragraph(entry)
+
+    target_doc.save(target_filename)
+    print(f"已更新总结文档: {target_filename}")
+
+# 截图并识别文本
+def capture_and_process_text(region=None):
+    screenshot = pyautogui.screenshot(region=region)
+    tessdata_dir_config = '--tessdata-dir "C:\\Program Files\\Tesseract-OCR\\tessdata"'
+    text = pytesseract.image_to_string(screenshot, lang='chi_sim', config=tessdata_dir_config)  # 使用简体中文
+    return text
+
+# 检查并保存包含“招聘”的信息
+def check_and_save_recruitment_info(doc, raw_data_file):
+    try:
+        text = capture_and_process_text()
+        lines = text.split('\n')
+        for line in lines:
+            if '招聘' in line:
+                print(f"检测到招聘信息: {line}")
+                save_to_doc(doc, line, raw_data_file)
+    except Exception as ex:
+        logging.error(f"捕获或处理文本时发生错误: {ex}", exc_info=True)
+        print(f"捕获或处理文本时发生错误: {ex}")
+
+# 定时任务：每二十分钟筛选并总结信息
+def scheduled_task():
+    print("开始筛选并总结信息...")
+    filter_and_summarize(raw_data_full_path, summarized_full_path, keywords)
+    print("信息筛选和总结完成。")
+
+# 监听键盘输入的线程函数
+def listen_for_exit(q):
+    print("你可以随时输入 'o' 来关闭脚本。")
+    while True:
+        user_input = input()
+        if user_input.lower() == 'o':
+            q.put('exit')
+            break
+
+# 主函数
+if __name__ == "__main__":
+    raw_data_file = '原始数据.docx'
+    summarized_file = '汇总后.docx'
+    keywords = ['工程师', '设计师', '程序员']  # 根据需要添加更多关键词
+
+    # 创建或初始化文档并保存到桌面
+    doc, raw_data_full_path = init_doc_on_desktop(raw_data_file)
+    # 如果希望每次运行都创建新文档，请取消下面这行的注释：
+    # doc, raw_data_full_path = ensure_new_doc_on_desktop(raw_data_file)
+
+    summarized_doc, summarized_full_path = init_doc_on_desktop(summarized_file)
+    # 如果希望每次运行都创建新文档，请取消下面这行的注释：
+    # summarized_doc, summarized_full_path = ensure_new_doc_on_desktop(summarized_file)
+
+    # 设置定时任务
+    schedule.every(20).minutes.do(scheduled_task)
+
+    # 创建队列和线程用于监听键盘输入
+    exit_queue = queue.Queue()
+    input_thread = threading.Thread(target=listen_for_exit, args=(exit_queue,))
+    input_thread.daemon = True  # 设置为守护线程，主线程结束时自动退出
+    input_thread.start()
+
+    print("程序启动，开始监控包含‘招聘’字样的信息...")
+
+    try:
+        while True:
+            if not exit_queue.empty():
+                if exit_queue.get() == 'exit':
+                    print("收到关闭指令，正在退出程序...")
+                    break
+
+            check_and_save_recruitment_info(doc, raw_data_full_path)
+            schedule.run_pending()
+            time.sleep(60)  # 每隔60秒检查一次
+    except KeyboardInterrupt:
+        print("程序被用户中断。")
+    except Exception as ex:
+        logging.error(f"主循环中发生错误: {ex}", exc_info=True)
+        print(f"主循环中发生错误: {ex}")
+    finally:
+        print("程序已停止。")
